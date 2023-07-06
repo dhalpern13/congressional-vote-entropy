@@ -14,6 +14,7 @@ def total_entropy(columns, data):
 
 def prediction_entropy(columns, data):
     group = data.groupby(list(columns))
+
     def scaled_entropy(data_subset):
         value_counts_per_column = data_subset.apply(pd.Series.value_counts, axis=0).fillna(0)
         column_entropies = entropy(value_counts_per_column, axis=0, base=2)
@@ -22,6 +23,7 @@ def prediction_entropy(columns, data):
         return scaled_down
 
     return group.apply(scaled_entropy).sum()
+
 
 def optimal_k_entropy(k, data):
     unique_columns = list(data.columns)
@@ -49,13 +51,14 @@ def optimal_prediction_entropy(k, data):
 def greedy_prediction_entropy(k, data):
     cur = []
     remaining_columns = set(data.columns)
-    for _ in range(k):
-        best_addition = min((bill for bill in tqdm(remaining_columns)),
+    for i in range(k):
+        best_addition = min((bill for bill in tqdm(remaining_columns, desc=f'{i + 1}.')),
                             key=lambda bill: prediction_entropy(cur + [bill], data))
         cur.append(best_addition)
         print(best_addition)
         remaining_columns.remove(best_addition)
     return cur
+
 
 def overall_prediction_entropy(data):
     return entropy(data.apply(pd.Series.value_counts, axis=0).fillna(0), axis=0, base=2).mean()
