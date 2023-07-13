@@ -5,6 +5,10 @@ import pandas as pd
 from scipy.stats import entropy
 from tqdm import tqdm
 
+from pandarallel import pandarallel
+
+pandarallel.initialize()
+
 
 def total_entropy(columns, data):
     restricted_votes = data[list(columns)]
@@ -40,6 +44,30 @@ def greedy_k_entropy(k, data):
         print(best_addition)
         remaining_columns.remove(best_addition)
     return cur
+
+def scaled_pred_entropy(data):
+    value_counts_per_column = data.apply(pd.Series.value_counts, axis=0).fillna(0)
+    column_entropies = entropy(value_counts_per_column, axis=0, base=2)
+    mean_entropy = column_entropies.mean()
+    scaled = mean_entropy * len(data)
+    return scaled
+
+
+def new_greedy_k_entropy(k, data):
+    cur_group_dfs = [data]
+    cur_columns = []
+    remaining_columns = set(data.columns)
+    for i in range(k):
+        def col_to_entropy(col):
+            return sum(group_df.groupby(col).apply(scaled_pred_entropy).sum() for group_df in cur_group_dfs)
+
+        cols_to_entropy_dict = {col: col_to_entropy(col) for col in tqdm(remaining_columns, desc=f'{i + 1}:')}
+        best_col = min(cols_to_entropy_dict, key=cols_to_entropy_dict.get)
+        print(f'{best_col}: {cols_to_entropy_dict[best_col] / len(data)}')
+        cur_columns.append(best_col)
+        remaining_columns.remove(best_col)
+        cur_group_dfs = [sub_group_df for group_df in cur_group_dfs for _, sub_group_df in group_df.groupby(best_col)]
+    return cur_columns
 
 
 def optimal_prediction_entropy(k, data):
