@@ -1,13 +1,10 @@
 from itertools import combinations
 from math import comb
+from multiprocessing import Pool
 
 import pandas as pd
 from scipy.stats import entropy
 from tqdm import tqdm
-
-from pandarallel import pandarallel
-
-pandarallel.initialize()
 
 
 def total_entropy(columns, data):
@@ -51,6 +48,34 @@ def scaled_pred_entropy(data):
     mean_entropy = column_entropies.mean()
     scaled = mean_entropy * len(data)
     return scaled
+
+def col_entropies(file_name):
+    df = pd.read_csv(file_name)
+    return {
+        col: df.groupby(col).apply(scaled_pred_entropy).sum() for col in df.columns
+    }
+
+def new_greedy_k_entropy2(k, data):
+    cur_group_dfs = [data]
+    cur_columns = []
+    remaining_columns = set(data.columns)
+    for iteration in range(k):
+        for j, df in enumerate(cur_group_dfs):
+            df.to_csv(f'temp/{j}.csv', index=False)
+
+        with Pool() as p:
+            df_col_entropies = list(tqdm(p.imap(col_entropies, [f'temp/{i}.csv' for i in range(len(cur_group_dfs))]), total=len(cur_group_dfs)))
+
+        cols_to_entropy = {
+            col: sum(d[col] for d in df_col_entropies) for col in data.columns
+        }
+        best_col = min(cols_to_entropy, key=cols_to_entropy.get)
+        print(f'{best_col}: {cols_to_entropy[best_col] / len(data)}')
+        cur_columns.append(best_col)
+        remaining_columns.remove(best_col)
+        cur_group_dfs = [sub_group_df for group_df in cur_group_dfs for _, sub_group_df in group_df.groupby(best_col)]
+    return cur_columns
+
 
 
 def new_greedy_k_entropy(k, data):
