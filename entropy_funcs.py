@@ -1,10 +1,14 @@
-from itertools import combinations
+from itertools import combinations, product
 from math import comb
 from multiprocessing import Pool
 
+import numpy as np
 import pandas as pd
 from scipy.stats import entropy
 from tqdm import tqdm
+from tqdm.contrib.concurrent import process_map
+
+np.seterr(invalid='ignore')
 
 
 def total_entropy(columns, data):
@@ -42,6 +46,7 @@ def greedy_k_entropy(k, data):
         remaining_columns.remove(best_addition)
     return cur
 
+
 def scaled_pred_entropy(data):
     value_counts_per_column = data.apply(pd.Series.value_counts, axis=0).fillna(0)
     column_entropies = entropy(value_counts_per_column, axis=0, base=2)
@@ -49,11 +54,13 @@ def scaled_pred_entropy(data):
     scaled = mean_entropy * len(data)
     return scaled
 
+
 def col_entropies(file_name):
     df = pd.read_csv(file_name)
     return {
         col: df.groupby(col).apply(scaled_pred_entropy).sum() for col in df.columns
     }
+
 
 def new_greedy_k_entropy2(k, data):
     cur_group_dfs = [data]
@@ -64,7 +71,8 @@ def new_greedy_k_entropy2(k, data):
             df.to_csv(f'temp/{j}.csv', index=False)
 
         with Pool() as p:
-            df_col_entropies = list(tqdm(p.imap(col_entropies, [f'temp/{i}.csv' for i in range(len(cur_group_dfs))]), total=len(cur_group_dfs)))
+            df_col_entropies = list(tqdm(p.imap(col_entropies, [f'temp/{i}.csv' for i in range(len(cur_group_dfs))]),
+                                         total=len(cur_group_dfs)))
 
         cols_to_entropy = {
             col: sum(d[col] for d in df_col_entropies) for col in data.columns
@@ -73,9 +81,123 @@ def new_greedy_k_entropy2(k, data):
         print(f'{best_col}: {cols_to_entropy[best_col] / len(data)}')
         cur_columns.append(best_col)
         remaining_columns.remove(best_col)
-        cur_group_dfs = [sub_group_df for group_df in cur_group_dfs for _, sub_group_df in group_df.groupby(best_col)]
+        cur_group_dfs = [sub_group_df for group_df in cur_group_dfs for _, sub_group_df in group_df.groupby(best_col) if
+                         len(sub_group_df) > 1]
     return cur_columns
 
+
+def new_greedy_k_entropy3(k, data):
+    as_np = data.to_numpy()
+    num_rows, num_cols = as_np.shape
+    indicators = np.stack([(as_np == i) for i in range(3)])
+    row_to_indices = dict()
+    for i in range(3):
+        row_id, col_id = np.nonzero(indicators[i].T)
+        keys, locs = np.unique(row_id, return_index=True)
+        as_dict = dict(zip(keys, np.split(col_id, locs[1:])))
+        with_sets = {
+            col: set(as_dict[col]) if col in as_dict else {} for col in range(num_cols)
+        }
+        row_to_indices[i] = with_sets
+
+    cur_group_indices = [set(range(num_rows))]
+    cur_columns = []
+    remaining_columns = set(range(num_cols))
+    for iteration in range(k):
+        col_to_entropy = {}
+        for col in tqdm(remaining_columns):
+            total = 0
+            for indices in cur_group_indices:
+                index_subsets = [list(indices.intersection(row_to_indices[i][col])) for i in range(3)]
+
+                for index_subset in index_subsets:
+                    subset_counts = indicators[:, index_subset, :].sum(axis=1)
+                    with np.errstate(divide='ignore'):
+                        ent = entropy(subset_counts, axis=0, base=2)
+                    mean_ent = np.nan_to_num(ent).mean()
+                    scaled = mean_ent * len(index_subset)
+                    total += scaled
+            col_to_entropy[col] = total
+
+        best_col = min(col_to_entropy, key=col_to_entropy.get)
+        print(f'{data.columns[best_col]}: {col_to_entropy[best_col] / len(data)}')
+        cur_columns.append(best_col)
+        remaining_columns.remove(best_col)
+        cur_group_indices = [indices.intersection(row_to_indices[i][best_col]) for i, indices in
+                             product(range(3), cur_group_indices)]
+        cur_group_indices = [s for s in cur_group_indices if len(s) > 1]
+    return cur_columns
+
+
+def new_greedy_k_entropy4(k, data):
+    as_np = data.to_numpy()
+    num_rows, num_cols = as_np.shape
+    indicators = np.stack([(as_np == i) for i in range(3)])
+    cur_group_indices = np.ones((1, num_rows))
+    cur_columns = []
+    remaining_columns = set(range(num_cols))
+
+    for iteration in range(k):
+        col_to_entropy = {}
+        for col in remaining_columns:
+            group_counts = cur_group_indices[:, None, :] * indicators[:, :, col]
+            flattened = group_counts.reshape(-1, group_counts.shape[-1])
+            split_group_counts = flattened.sum(axis=1)
+            response_counts = flattened @ indicators
+            ent = entropy(response_counts, axis=0, base=2)
+            nan_filled = np.nan_to_num(ent)
+            mean_column = nan_filled.mean(axis=1)
+            scaled = mean_column * split_group_counts
+            col_to_entropy[col] = scaled.sum()
+
+        best_col = min(col_to_entropy, key=col_to_entropy.get)
+        print(f'{data.columns[best_col]}: {col_to_entropy[best_col] / len(data)}')
+        cur_columns.append(best_col)
+        remaining_columns.remove(best_col)
+
+        best_group_counts = cur_group_indices[:, None, :] * indicators[:, :, best_col]
+        best_flattened = best_group_counts.reshape(-1, best_group_counts.shape[-1])
+
+        cur_group_indices = best_flattened[best_flattened.sum(axis=1) > 1]
+    return cur_columns
+
+
+def col_entropy(args):
+    col, cur_group_indices, indicators = args
+    group_counts = cur_group_indices[:, None, :] * indicators[:, :, col]
+    flattened = group_counts.reshape(-1, group_counts.shape[-1])
+    split_group_counts = flattened.sum(axis=1)
+    response_counts = flattened @ indicators
+    with np.errstate(divide='ignore'):
+        ent = entropy(response_counts, axis=0, base=2)
+    nan_filled = np.nan_to_num(ent)
+    mean_column = nan_filled.mean(axis=1)
+    scaled = mean_column * split_group_counts
+    return scaled.sum()
+
+
+def new_greedy_k_entropy5(k, data):
+    as_np = data.to_numpy()
+    num_rows, num_cols = as_np.shape
+    indicators = np.stack([(as_np == i) for i in range(3)])
+    cur_group_indices = np.ones((1, num_rows))
+    cur_columns = []
+    remaining_columns = list(range(num_cols))
+
+    for iteration in range(k):
+        entropies = process_map(col_entropy, [(c, cur_group_indices, indicators) for c in remaining_columns])
+        col_to_entropy = dict(zip(remaining_columns, entropies))
+
+        best_col = min(col_to_entropy, key=col_to_entropy.get)
+        print(f'{data.columns[best_col]}: {col_to_entropy[best_col] / len(data)}')
+        cur_columns.append(best_col)
+        remaining_columns.remove(best_col)
+
+        best_group_counts = cur_group_indices[:, None, :] * indicators[:, :, best_col]
+        best_flattened = best_group_counts.reshape(-1, best_group_counts.shape[-1])
+
+        cur_group_indices = best_flattened[best_flattened.sum(axis=1) > 1]
+    return cur_columns
 
 
 def new_greedy_k_entropy(k, data):
